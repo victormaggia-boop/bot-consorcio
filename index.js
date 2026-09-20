@@ -41,8 +41,8 @@ const client = new Client({
 });
 
 client.on('qr', (qr) => {
-    console.log('\n🤖 NOVO QR CODE GERADO! LEIA COM O WHATSAPP DO BOT (Ou do seu cliente):');
-    qrcode.generate(qr, { small: true });
+    console.log('NOVO QR CODE GERADO! Clique no link abaixo para abrir a imagem limpa e escanear:');
+    console.log(`https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(qr)}`);
 });
 
 client.on('ready', () => {
