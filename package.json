@@ -14,6 +14,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.109.0",
     "dotenv": "^18.0.1",
+    "lucide-react": "^1.47.0",
     "openai": "^6.49.0",
     "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "^1.34.7",

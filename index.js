@@ -13,7 +13,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const supabase = createClient(
     process.env.SUPABASE_URL, 
-    process.env.SUPABASE_SERVICE_ROLE_KEY,
+    process.env.SUPABASE_SERVICE_ROLE_KEY, // Usa a Role Key para ignorar RLS no backend
     {
         realtime: {
             transport: ws
@@ -23,14 +23,41 @@ const supabase = createClient(
 const NUMERO_DO_CORRETOR = process.env.NUMERO_DO_CORRETOR; 
 
 // ==========================================
-// 2. CONTROLO DE ESTADO DO ROBÔ
+// 2. FUNÇÃO: BUSCAR CONFIGURAÇÕES DINÂMICAS (SAAS)
+// ==========================================
+async function obterConfiguracoesIA(clienteId = '00000000-0000-0000-0000-000000000000') {
+    try {
+        const { data, error } = await supabase
+            .from('configuracoes_bot')
+            .select('*')
+            .eq('cliente_id', clienteId)
+            .single();
+
+        if (error || !data) {
+            console.log("⚠️ Configurações não encontradas no Supabase. A usar valores padrão.");
+            return {
+                cliente_id: clienteId,
+                nome_empresa: "Porto Seguro (Padrão)",
+                tom_voz: "Profissional e consultivo",
+                promocoes: "Nenhuma campanha ativa no momento."
+            };
+        }
+        return data;
+    } catch (error) {
+        console.error("❌ Erro ao buscar configurações da IA:", error);
+        return { cliente_id: clienteId, nome_empresa: "Maggia Consórcios", tom_voz: "Profissional", promocoes: "" };
+    }
+}
+
+// ==========================================
+// 3. CONTROLO DE ESTADO DO ROBÔ
 // ==========================================
 const historicoConversas = new Map();
 const cronometros = new Map();
 const leadsTransferidos = new Set(); 
 
 // ==========================================
-// 3. INICIALIZAÇÃO DO WHATSAPP
+// 4. INICIALIZAÇÃO DO WHATSAPP
 // ==========================================
 console.log("⏳ A iniciar o Bot de Triagem SDR (Consórcios)...");
 const client = new Client({
@@ -52,7 +79,7 @@ client.on('ready', () => {
 });
 
 // ==========================================
-// 4. PROCESSAMENTO DE MENSAGENS (CÉREBRO)
+// 5. PROCESSAMENTO DE MENSAGENS (CÉREBRO)
 // ==========================================
 client.on('message', async (msg) => {
     if (msg.from.includes('@g.us') || msg.from === 'status@broadcast') return;
@@ -66,15 +93,25 @@ client.on('message', async (msg) => {
     if (cronometros.has(numeroCliente)) clearTimeout(cronometros.get(numeroCliente));
 
     try {
-        // --- INICIALIZA A MEMÓRIA DA IA PARA ESTE CLIENTE ---
+        // --- INICIALIZA A MEMÓRIA E INJETA A PERSONALIDADE ---
         if (!historicoConversas.has(numeroCliente)) {
+            
+            // 1. Vai buscar os dados ao Painel Web (Supabase)
+            const configIA = await obterConfiguracoesIA();
+            
             historicoConversas.set(numeroCliente, [{
                 role: "system",
-                content: `Você é a assistente virtual de triagem e SDR especialista em Consórcios da Porto Seguro.
+                content: `Você é a assistente virtual de triagem e SDR especialista em Consórcios da empresa ${configIA.nome_empresa}.
 O seu objetivo é recolher dados do cliente, esclarecer dúvidas, contornar objeções e, no final, qualificar se o cliente é um LEAD QUENTE ou FRIO.
 
+=== COMPORTAMENTO E TOM DE VOZ ===
+Aja de forma natural seguindo estritamente este perfil: ${configIA.tom_voz}.
+
+=== AVISOS E PROMOÇÕES ATUAIS (REGRAS DINÂMICAS) ===
+Utilize estas informações caso o cliente pergunte ou para ajudar a fechar negócio:
+${configIA.promocoes}
+
 === BASE DE CONHECIMENTO E AUTORIDADE ===
-- Trabalhamos com a Porto Seguro, uma instituição tradicional, extremamente segura e 100% fiscalizada pelo Banco Central.
 - Não cobramos juros como nos financiamentos bancários convencionais, apenas uma taxa de administração fixa e diluída.
 - Prazos normais: Automóveis (até 80 meses), Imóveis (até 240 meses).
 - Formas de contemplação: Sorteio mensal ou Lance.
@@ -83,7 +120,6 @@ O seu objetivo é recolher dados do cliente, esclarecer dúvidas, contornar obje
 - "Demora muito": Explique que é um planeamento financeiro inteligente. Com o "lance", o cliente pode antecipar a compra saindo muito mais barato do que pagar juros ao banco.
 - "Tem taxa / É caro": Esclareça que no consórcio NÃO HÁ JUROS. No financiamento bancário o cliente paga 2 bens, enquanto no consórcio paga quase apenas 1.
 - "Não tenho entrada": Tranquilize-o indicando que a maior vantagem do consórcio é não exigir entrada. Concorre todos os meses pagando apenas a parcela.
-- "É seguro? / Tenho medo": Dê a cartada de autoridade. Lembre que a Porto Seguro é uma das maiores e mais seguras do mercado.
 
 REGRAS DE ATENDIMENTO:
 Faça estas perguntas de forma natural, UMA DE CADA VEZ, simulando uma conversa humana amigável (nunca envie um questionário de uma vez):
@@ -100,9 +136,18 @@ CRITÉRIOS DE QUALIFICAÇÃO (Para usar na função final):
 FINALIZAÇÃO:
 Quando tiver todas as 5 respostas, despeça-se brevemente e chame a função 'finalizar_triagem' com os dados e a sua classificação.`
             }]);
+            
+            // Grava o ID do cliente na sessão para usar no final
+            historicoConversas.get(numeroCliente).cliente_id = configIA.cliente_id;
         }
 
         const conversaAtual = historicoConversas.get(numeroCliente);
+        
+        // Remove a propriedade extra 'cliente_id' antes de enviar para a OpenAI para não causar erro de formatação
+        const mensagensParaOpenAI = conversaAtual.filter(m => m.role); 
+        mensagensParaOpenAI.push({ role: "user", content: msg.body });
+        
+        // Atualiza a memória local com a mensagem do utilizador
         conversaAtual.push({ role: "user", content: msg.body });
 
         // --- DEFINIÇÃO DA FUNÇÃO DE QUALIFICAÇÃO ---
@@ -132,7 +177,7 @@ Quando tiver todas as 5 respostas, despeça-se brevemente e chame a função 'fi
         // --- CHAMADA À OPENAI ---
         const respostaIA = await openai.chat.completions.create({ 
             model: "gpt-4o-mini", 
-            messages: conversaAtual, 
+            messages: mensagensParaOpenAI, 
             tools: ferramentas 
         });
         
@@ -146,12 +191,14 @@ Quando tiver todas as 5 respostas, despeça-se brevemente e chame a função 'fi
             if (toolCall.function.name === 'finalizar_triagem') {
                 const args = JSON.parse(toolCall.function.arguments);
                 const telefoneLimpo = numeroCliente.split('@')[0];
+                const clienteIdAtual = conversaAtual.cliente_id || '00000000-0000-0000-0000-000000000000';
 
                 console.log(`\n🎯 [LEAD ${args.classificacao}] ${args.nome} - Objetivo: ${args.objetivo}`);
                 console.log(`🧠 Análise da IA: ${args.feedback_consultor}\n`);
 
-                // 1. GUARDA NO BANCO DE DADOS (SUPABASE)
+                // 1. GUARDA NO BANCO DE DADOS (SUPABASE) - AGORA COM CLIENTE_ID
                 const { error: dbError } = await supabase.from('leads_consorcio').insert([{
+                    cliente_id: clienteIdAtual,
                     telefone: telefoneLimpo,
                     nome: args.nome,
                     objetivo: args.objetivo,
@@ -166,7 +213,7 @@ Quando tiver todas as 5 respostas, despeça-se brevemente e chame a função 'fi
 
                 // 2. LÓGICA DE ENCAMINHAMENTO (QUENTE VS FRIO)
                 if (args.classificacao === 'QUENTE') {
-                    const alertaCorretor = `🔥 *NOVO LEAD QUENTE (PORTO SEGURO)!* 🔥\n\n` +
+                    const alertaCorretor = `🔥 *NOVO LEAD QUENTE!* 🔥\n\n` +
                                          `👤 *Nome:* ${args.nome}\n` +
                                          `📱 *WhatsApp:* wa.me/${telefoneLimpo}\n` +
                                          `🎯 *Objetivo:* ${args.objetivo}\n` +
@@ -177,8 +224,7 @@ Quando tiver todas as 5 respostas, despeça-se brevemente e chame a função 'fi
                                          `_O robô silenciou-se. Pode assumir a venda e fechar negócio!_`;
                     
                     await client.sendMessage(NUMERO_DO_CORRETOR, alertaCorretor);
-                    
-                    await msg.reply(`Tudo anotado, ${args.nome}! 📋\n\nO nosso especialista da Porto Seguro acabou de receber o seu perfil e vai contactá-lo por aqui em instantes com as melhores propostas de ${args.objetivo}. Obrigado!`);
+                    await msg.reply(`Tudo anotado, ${args.nome}! 📋\n\nO nosso especialista acabou de receber o seu perfil e vai contactá-lo por aqui em instantes com as melhores propostas de ${args.objetivo}. Obrigado!`);
                 } else {
                     await msg.reply(`Obrigado pelas informações, ${args.nome}! 📋\n\nA nossa equipa comercial vai analisar o seu perfil e entraremos em contacto consigo no futuro com mais detalhes sobre os grupos que se encaixam neste momento.`);
                 }
