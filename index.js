@@ -13,39 +13,40 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const supabase = createClient(
     process.env.SUPABASE_URL, 
-    process.env.SUPABASE_SERVICE_ROLE_KEY, // Usa a Role Key para ignorar RLS no backend
-    {
-        realtime: {
-            transport: ws
-        }
-    }
+    process.env.SUPABASE_SERVICE_ROLE_KEY, // Usa a Role Key para contornar RLS no backend
+    { realtime: { transport: ws } }
 );
+
+// Estas duas variáveis virão do painel do Railway
 const NUMERO_DO_CORRETOR = process.env.NUMERO_DO_CORRETOR; 
+const SUPABASE_USER_ID = process.env.SUPABASE_USER_ID; // <--- O ID do Dono da conta
 
 // ==========================================
-// 2. FUNÇÃO: BUSCAR CONFIGURAÇÕES DINÂMICAS (SAAS)
+// 2. FUNÇÃO: BUSCAR CONFIGURAÇÕES DINÂMICAS
 // ==========================================
-async function obterConfiguracoesIA(clienteId = '00000000-0000-0000-0000-000000000000') {
+async function obterConfiguracoesIA() {
     try {
+        if (!SUPABASE_USER_ID) throw new Error("SUPABASE_USER_ID não configurado no .env");
+
         const { data, error } = await supabase
             .from('configuracoes_bot')
             .select('*')
-            .eq('cliente_id', clienteId)
+            .eq('user_id', SUPABASE_USER_ID) // <--- Busca pelas configs deste cliente específico
             .single();
 
         if (error || !data) {
             console.log("⚠️ Configurações não encontradas no Supabase. A usar valores padrão.");
             return {
-                cliente_id: clienteId,
-                nome_empresa: "Porto Seguro (Padrão)",
+                user_id: SUPABASE_USER_ID,
+                nome_empresa: "Maggia Consórcios (Padrão)",
                 tom_voz: "Profissional e consultivo",
                 promocoes: "Nenhuma campanha ativa no momento."
             };
         }
         return data;
     } catch (error) {
-        console.error("❌ Erro ao buscar configurações da IA:", error);
-        return { cliente_id: clienteId, nome_empresa: "Maggia Consórcios", tom_voz: "Profissional", promocoes: "" };
+        console.error("❌ Erro ao buscar configurações da IA:", error.message);
+        return { user_id: SUPABASE_USER_ID, nome_empresa: "Bot Padrão", tom_voz: "Profissional", promocoes: "" };
     }
 }
 
@@ -59,9 +60,11 @@ const leadsTransferidos = new Set();
 // ==========================================
 // 4. INICIALIZAÇÃO DO WHATSAPP
 // ==========================================
-console.log("⏳ A iniciar o Bot de Triagem SDR (Consórcios)...");
+console.log("⏳ A iniciar o Bot de Triagem SDR...");
+console.log(`🔐 Amarrado à conta Supabase ID: ${SUPABASE_USER_ID}`);
+
 const client = new Client({
-    authStrategy: new LocalAuth({ clientId: 'bot-consorcio-sdr' }),
+    authStrategy: new LocalAuth({ clientId: 'bot-sdr-session' }),
     puppeteer: {
         args: ['--no-sandbox', '--disable-setuid-sandbox']
     }
@@ -73,7 +76,7 @@ client.on('qr', (qr) => {
 });
 
 client.on('ready', () => {
-    console.log('\n✅ SDR de Consórcios ATIVO e CONECTADO!');
+    console.log('\n✅ SDR ATIVO e CONECTADO!');
     console.log(`📡 Os Leads QUENTES serão enviados para: ${NUMERO_DO_CORRETOR}`);
     console.log('À espera de novos clientes...\n');
 });
@@ -93,10 +96,8 @@ client.on('message', async (msg) => {
     if (cronometros.has(numeroCliente)) clearTimeout(cronometros.get(numeroCliente));
 
     try {
-        // --- INICIALIZA A MEMÓRIA E INJETA A PERSONALIDADE ---
         if (!historicoConversas.has(numeroCliente)) {
             
-            // 1. Vai buscar os dados ao Painel Web (Supabase)
             const configIA = await obterConfiguracoesIA();
             
             historicoConversas.set(numeroCliente, [{
@@ -122,7 +123,7 @@ ${configIA.promocoes}
 - "Não tenho entrada": Tranquilize-o indicando que a maior vantagem do consórcio é não exigir entrada. Concorre todos os meses pagando apenas a parcela.
 
 REGRAS DE ATENDIMENTO:
-Faça estas perguntas de forma natural, UMA DE CADA VEZ, simulando uma conversa humana amigável (nunca envie um questionário de uma vez)so termine a conversa quando tiver dodas informçoes abaixo:
+Faça estas perguntas de forma natural, UMA DE CADA VEZ, simulando uma conversa humana amigável (nunca envie um questionário de uma vez) só termine a conversa quando tiver todas informações abaixo:
 1. Nome do cliente.
 2. Objetivo (Imóvel, Carro, Moto, Pesados ou Investimento).
 3. Valor da carta de crédito desejada.
@@ -136,21 +137,11 @@ CRITÉRIOS DE QUALIFICAÇÃO (Para usar na função final):
 FINALIZAÇÃO:
 Quando tiver todas as 5 respostas, despeça-se brevemente e chame a função 'finalizar_triagem' com os dados e a sua classificação.`
             }]);
-            
-            // Grava o ID do cliente na sessão para usar no final
-            historicoConversas.get(numeroCliente).cliente_id = configIA.cliente_id;
         }
 
         const conversaAtual = historicoConversas.get(numeroCliente);
-        
-        // Remove a propriedade extra 'cliente_id' antes de enviar para a OpenAI para não causar erro de formatação
-        const mensagensParaOpenAI = conversaAtual.filter(m => m.role); 
-        mensagensParaOpenAI.push({ role: "user", content: msg.body });
-        
-        // Atualiza a memória local com a mensagem do utilizador
         conversaAtual.push({ role: "user", content: msg.body });
 
-        // --- DEFINIÇÃO DA FUNÇÃO DE QUALIFICAÇÃO ---
         const ferramentas = [
             { 
                 type: "function", 
@@ -165,8 +156,8 @@ Quando tiver todas as 5 respostas, despeça-se brevemente e chame a função 'fi
                             valor_carta: { type: "string" }, 
                             parcela_ideal: { type: "string" }, 
                             tem_lance: { type: "string" },
-                            classificacao: { type: "string", enum: ["QUENTE", "FRIO"], description: "Avaliação do potencial real de compra do cliente." },
-                            feedback_consultor: { type: "string", description: "Breve resumo explicando o motivo desta classificação para o corretor ler." }
+                            classificacao: { type: "string", enum: ["QUENTE", "FRIO"] },
+                            feedback_consultor: { type: "string" }
                         }, 
                         required: ["nome", "objetivo", "valor_carta", "parcela_ideal", "tem_lance", "classificacao", "feedback_consultor"] 
                     } 
@@ -174,31 +165,27 @@ Quando tiver todas as 5 respostas, despeça-se brevemente e chame a função 'fi
             }
         ];
 
-        // --- CHAMADA À OPENAI ---
         const respostaIA = await openai.chat.completions.create({ 
             model: "gpt-4o-mini", 
-            messages: mensagensParaOpenAI, 
+            messages: conversaAtual, 
             tools: ferramentas 
         });
         
         const mensagemIA = respostaIA.choices[0].message;
         conversaAtual.push(mensagemIA);
 
-        // --- SE A IA FINALIZOU A TRIAGEM E CHAMOU A FUNÇÃO ---
         if (mensagemIA.tool_calls?.length > 0) {
             const toolCall = mensagemIA.tool_calls[0];
             
             if (toolCall.function.name === 'finalizar_triagem') {
                 const args = JSON.parse(toolCall.function.arguments);
                 const telefoneLimpo = numeroCliente.split('@')[0];
-                const clienteIdAtual = conversaAtual.cliente_id || '00000000-0000-0000-0000-000000000000';
 
-                console.log(`\n🎯 [LEAD ${args.classificacao}] ${args.nome} - Objetivo: ${args.objetivo}`);
-                console.log(`🧠 Análise da IA: ${args.feedback_consultor}\n`);
+                console.log(`\n🎯 [LEAD ${args.classificacao}] ${args.nome} salvo na conta: ${SUPABASE_USER_ID}`);
 
-                // 1. GUARDA NO BANCO DE DADOS (SUPABASE) - AGORA COM CLIENTE_ID
+                // 1. GUARDA NO BANCO DE DADOS - AMARRADO AO USER_ID DO CLIENTE
                 const { error: dbError } = await supabase.from('leads_consorcio').insert([{
-                    cliente_id: clienteIdAtual,
+                    user_id: SUPABASE_USER_ID, // <--- Esta linha faz a magia de enviar pro painel certo
                     telefone: telefoneLimpo,
                     nome: args.nome,
                     objetivo: args.objetivo,
@@ -206,12 +193,13 @@ Quando tiver todas as 5 respostas, despeça-se brevemente e chame a função 'fi
                     parcela_ideal: args.parcela_ideal,
                     tem_lance: args.tem_lance,
                     status: args.classificacao, 
-                    feedback: args.feedback_consultor 
+                    feedback: args.feedback_consultor,
+                    etapa_venda: 'Em Andamento'
                 }]);
 
                 if (dbError) console.error("❌ Erro ao salvar lead no Supabase:", dbError.message);
 
-                // 2. LÓGICA DE ENCAMINHAMENTO (QUENTE VS FRIO)
+                // 2. LÓGICA DE ENCAMINHAMENTO
                 if (args.classificacao === 'QUENTE') {
                     const alertaCorretor = `🔥 *NOVO LEAD QUENTE!* 🔥\n\n` +
                                          `👤 *Nome:* ${args.nome}\n` +
@@ -221,7 +209,7 @@ Quando tiver todas as 5 respostas, despeça-se brevemente e chame a função 'fi
                                          `📅 *Parcela:* ${args.parcela_ideal}\n` +
                                          `💸 *Lance:* ${args.tem_lance}\n\n` +
                                          `🧠 *Análise da IA:* ${args.feedback_consultor}\n\n` +
-                                         `_O robô silenciou-se. Pode assumir a venda e fechar negócio!_`;
+                                         `_O robô silenciou-se. Pode assumir a venda!_`;
                     
                     await client.sendMessage(NUMERO_DO_CORRETOR, alertaCorretor);
                     await msg.reply(`Tudo anotado, ${args.nome}! 📋\n\nO nosso especialista acabou de receber o seu perfil e vai contactá-lo por aqui em instantes com as melhores propostas de ${args.objetivo}. Obrigado!`);
@@ -229,17 +217,15 @@ Quando tiver todas as 5 respostas, despeça-se brevemente e chame a função 'fi
                     await msg.reply(`Obrigado pelas informações, ${args.nome}! 📋\n\nA nossa equipa comercial vai analisar o seu perfil e entraremos em contacto consigo no futuro com mais detalhes sobre os grupos que se encaixam neste momento.`);
                 }
 
-                // 3. BLOQUEIA O ROBÔ PARA ESTE NÚMERO
                 leadsTransferidos.add(numeroCliente);
             }
         } else {
             await msg.reply(mensagemIA.content);
         }
 
-        // --- GESTÃO DE MEMÓRIA ---
         const timer = setTimeout(() => { 
             historicoConversas.delete(numeroCliente); 
-            console.log(`🧹 Memória limpa para o número ${numeroCliente.split('@')[0]}`);
+            console.log(`🧹 Memória limpa para ${numeroCliente.split('@')[0]}`);
         }, 30 * 60 * 1000);
         cronometros.set(numeroCliente, timer);
 
