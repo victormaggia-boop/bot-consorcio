@@ -70,17 +70,40 @@ const client = new Client({
     }
 });
 
-client.on('qr', (qr) => {
-    console.log('NOVO QR CODE GERADO! Clique no link abaixo para abrir a imagem limpa e escanear:');
-    console.log(`https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(qr)}`);
+client.on('qr', async (qr) => {
+    console.log('NOVO QR CODE GERADO! A enviar para o painel web...');
+    // Guarda o texto do QR Code no banco de dados para o painel ler
+    await supabase
+        .from('configuracoes_bot')
+        .upsert({ 
+            user_id: SUPABASE_USER_ID, 
+            qr_code: qr, 
+            status_conexao: 'aguardando' 
+        }, { onConflict: 'user_id' });
 });
 
-client.on('ready', () => {
+client.on('ready', async () => {
     console.log('\n✅ SDR ATIVO e CONECTADO!');
+    
+    // Apaga o QR Code e marca como conectado
+    await supabase
+        .from('configuracoes_bot')
+        .upsert({ 
+            user_id: SUPABASE_USER_ID, 
+            qr_code: null, 
+            status_conexao: 'conectado' 
+        }, { onConflict: 'user_id' });
+
     console.log(`📡 Os Leads QUENTES serão enviados para: ${NUMERO_DO_CORRETOR}`);
     console.log('À espera de novos clientes...\n');
 });
 
+client.on('disconnected', async (reason) => {
+    console.log('🔴 WhatsApp desconectado!', reason);
+    await supabase
+        .from('configuracoes_bot')
+        .upsert({ user_id: SUPABASE_USER_ID, status_conexao: 'desconectado' }, { onConflict: 'user_id' });
+});
 // ==========================================
 // 5. PROCESSAMENTO DE MENSAGENS (CÉREBRO)
 // ==========================================
