@@ -72,14 +72,34 @@ const client = new Client({
 
 client.on('qr', async (qr) => {
     console.log('NOVO QR CODE GERADO! A enviar para o painel web...');
-    // Guarda o texto do QR Code no banco de dados para o painel ler
-    await supabase
+    
+    // Substituímos o upsert por um update direto e adicionámos verificação de erro
+    const { error } = await supabase
         .from('configuracoes_bot')
-        .upsert({ 
-            user_id: SUPABASE_USER_ID, 
+        .update({ 
             qr_code: qr, 
             status_conexao: 'aguardando' 
-        }, { onConflict: 'user_id' });
+        })
+        .eq('user_id', SUPABASE_USER_ID);
+        
+    if (error) console.error("❌ Erro ao guardar QR Code no Supabase:", error.message);
+});
+
+client.on('ready', async () => {
+    console.log('\n✅ SDR ATIVO e CONECTADO!');
+    
+    const { error } = await supabase
+        .from('configuracoes_bot')
+        .update({ 
+            qr_code: null, 
+            status_conexao: 'conectado' 
+        })
+        .eq('user_id', SUPABASE_USER_ID);
+
+    if (error) console.error("❌ Erro ao limpar QR Code no Supabase:", error.message);
+
+    console.log(`📡 Os Leads QUENTES serão enviados para: ${NUMERO_DO_CORRETOR}`);
+    console.log('À espera de novos clientes...\n');
 });
 
 client.on('ready', async () => {
@@ -102,8 +122,10 @@ client.on('disconnected', async (reason) => {
     console.log('🔴 WhatsApp desconectado!', reason);
     await supabase
         .from('configuracoes_bot')
-        .upsert({ user_id: SUPABASE_USER_ID, status_conexao: 'desconectado' }, { onConflict: 'user_id' });
+        .update({ status_conexao: 'desconectado' })
+        .eq('user_id', SUPABASE_USER_ID);
 });
+
 // ==========================================
 // 5. PROCESSAMENTO DE MENSAGENS (CÉREBRO)
 // ==========================================
